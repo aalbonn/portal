@@ -1,5 +1,5 @@
 "use client";
-import { Eye, UserCheck, UserClock, Landmark, AlertTriangle, HelpCircle, MapPin, FileCheck, Edit3, ShieldCheck, UserCog, BellRing, Clock, CreditCard, Users, Pencil, Trash2, Plus, X, Building2, Briefcase, FileText, CheckCircle2, AlertCircle, Search, Filter, ArrowUpDown, ChevronDown, LogOut, Eraser, Sparkles, Globe, Ticket, IdCard, User, Lock, ShieldAlert, BadgeCheck, Mail, KeyRound } from "lucide-react";
+import { Eye, Plane, UserCheck, UserClock, Landmark, AlertTriangle, HelpCircle, MapPin, FileCheck, Edit3, ShieldCheck, UserCog, BellRing, Clock, CreditCard, Users, Pencil, Trash2, Plus, X, Building2, Briefcase, FileText, CheckCircle2, AlertCircle, Search, Filter, ArrowUpDown, ChevronDown, LogOut, Eraser, Sparkles, Globe, Ticket, IdCard, User, Lock, ShieldAlert, BadgeCheck, Mail, KeyRound } from "lucide-react";
 import { useSession, signOut } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -37,6 +37,10 @@ export default function Dashboard() {
   const [showUserModal, setShowUserModal] = useState(false);
   const [viewCandidate, setViewCandidate] = useState<any | null>(null);
   const [ministryCandidate, setMinistryCandidate] = useState<any | null>(null);
+  const [ticketCandidate, setTicketCandidate] = useState<any | null>(null);
+  const [ticketStatus, setTicketStatus] = useState("Bilet Bekliyor");
+  const [ticketError, setTicketError] = useState("");
+  const [ticketFlightInfo, setTicketFlightInfo] = useState({ flightNo: "", depLocation: "", depDate: "", depTime: "", arrLocation: "", arrDate: "", arrTime: "", isConnecting: false, connLocation: "", connArrDate: "", connArrTime: "", connDepDate: "", connDepTime: "", connDuration: "" });
 
   const [confirmDialog, setConfirmDialog] = useState({
   isOpen: false,
@@ -79,6 +83,18 @@ export default function Dashboard() {
         aVal = a?.company?.name || "";
         bVal = b?.company?.name || "";
       }
+
+            if (sortConfig.column === "arrDate") {
+              const getArr = (item: any) => {
+                let fd = null;
+                if (item && item.notes && item.notes.includes('_###FLIGHT_DATA###_')) {
+                    try { fd = JSON.parse(item.notes.split('_###FLIGHT_DATA###_')[1].trim()); } catch(e){}
+                }
+                return fd?.arrDate || "";
+              };
+              aVal = getArr(a);
+              bVal = getArr(b);
+            }
 
       if (aVal === null || aVal === undefined) aVal = "";
       if (bVal === null || bVal === undefined) bVal = "";
@@ -218,7 +234,35 @@ export default function Dashboard() {
   const [userForm, setUserForm] = useState(initialUserForm);
   const [ministryForm, setMinistryForm] = useState(initialMinistryForm);
 
-  // Otomatik Tarih Atama (Personel Ekle/Düzenle)
+  
+  // Otomatik Bekleme Süresi Hesaplama
+  useEffect(() => {
+    if (typeof ticketFlightInfo !== 'undefined' && ticketFlightInfo.isConnecting && ticketFlightInfo.connArrDate && ticketFlightInfo.connArrTime && ticketFlightInfo.connDepDate && ticketFlightInfo.connDepTime) {
+      const arr = new Date(`${ticketFlightInfo.connArrDate}T${ticketFlightInfo.connArrTime}`);
+      const dep = new Date(`${ticketFlightInfo.connDepDate}T${ticketFlightInfo.connDepTime}`);
+      
+      if (!isNaN(arr.getTime()) && !isNaN(dep.getTime())) {
+        const diffMs = dep.getTime() - arr.getTime();
+        
+        if (diffMs >= 0) {
+          const diffHrs = Math.floor(diffMs / (1000 * 60 * 60));
+          const diffMins = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
+          const durationStr = `${String(diffHrs).padStart(2, '0')}:${String(diffMins).padStart(2, '0')}`;
+          
+          if (ticketFlightInfo.connDuration !== durationStr) {
+            setTicketFlightInfo((prev: any) => ({ ...prev, connDuration: durationStr }));
+          }
+        } else {
+          // İnişten önce kalkış yazılamaz, girilirse kutuyu temizler
+          if (ticketFlightInfo.connDuration !== "") {
+            setTicketFlightInfo((prev: any) => ({ ...prev, connDuration: "" }));
+          }
+        }
+      }
+    }
+  }, [ticketFlightInfo?.isConnecting, ticketFlightInfo?.connArrDate, ticketFlightInfo?.connArrTime, ticketFlightInfo?.connDepDate, ticketFlightInfo?.connDepTime]);
+
+// Otomatik Tarih Atama (Personel Ekle/Düzenle)
   useEffect(() =>{
     const getTodayStr = () =>{
       const d = new Date();
@@ -325,7 +369,42 @@ export default function Dashboard() {
         fetch(`/api/demands?query=${encodeURIComponent(search)}`),
       ]);
       
-      const candData = candRes.ok ? await candRes.json() : [];
+      let candData = candRes.ok ? await candRes.json() : [];
+      if (Array.isArray(candData)) {
+          candData = candData.map((c: any) => {
+              if (c.notes && c.notes.includes('_###FLIGHT_DATA###_')) {
+                  try {
+                      const fd = JSON.parse(c.notes.split('_###FLIGHT_DATA###_')[1].trim());
+                      
+                      if ((fd.uiStatus === "Bilet Alındı" || fd.uiStatus === "Bilet Zamanı Geldi (Durum Bilinmiyor)") && 
+                          (c.status === "Bilet Bekliyor" || c.status === "Bilet Alındı" || c.status === "Bilet Zamanı Geldi (Durum Bilinmiyor)")) {
+                          
+                          let isExpired = false;
+                          if (fd.arrDate) {
+                              const [y, m, d] = fd.arrDate.split('-').map(Number);
+                              const [hr, min] = (fd.arrTime || "00:00").split(':').map(Number);
+                              const target = new Date(y, m - 1, d, hr || 0, min || 0, 0);
+                              const now = new Date();
+                              
+                              if (target.getTime() < now.getTime()) {
+                                  isExpired = true;
+                              }
+                          }
+
+                          if (isExpired) {
+                              c.status = "Bilet Zamanı Geldi (Durum Bilinmiyor)";
+                          } else {
+                              c.status = fd.uiStatus === "Bilet Zamanı Geldi (Durum Bilinmiyor)" ? "Bilet Zamanı Geldi (Durum Bilinmiyor)" : "Bilet Alındı";
+                          }
+
+                      } else if (fd.uiStatus === "Şirkette Çalışıyor") {
+                          c.status = "Şirkette Çalışıyor";
+                      }
+                  } catch(e) {}
+              }
+              return c;
+          });
+      }
       const compData = compRes.ok ? await compRes.json() : [];
       const demData = demRes.ok ? await demRes.json() : [];
       setCandidates(Array.isArray(candData) ? candData : []);
@@ -430,6 +509,25 @@ export default function Dashboard() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         ...candForm,
+        status: (candForm.status === "Bilet Alındı" || candForm.status === "Bilet Zamanı Geldi (Durum Bilinmiyor)") ? "Bilet Bekliyor" : candForm.status,
+        notes: (() => {
+            let finalNotes = candForm.notes || "";
+            if (finalNotes.includes('_###FLIGHT_DATA###_')) finalNotes = finalNotes.split('_###FLIGHT_DATA###_')[0].trim();
+            finalNotes = finalNotes.replace(/\[UÇUŞ BİLGİSİ\][\s\S]*/g, '').trim();
+            if (editingCandidateId) {
+                const orig = candidates.find(c => c.id === editingCandidateId);
+                if (orig && orig.notes && orig.notes.includes('_###FLIGHT_DATA###_')) {
+                    let fdStr = orig.notes.split('_###FLIGHT_DATA###_')[1].trim();
+                    try {
+                        let fdObj = JSON.parse(fdStr);
+                        fdObj.uiStatus = candForm.status; // Senkronizasyon burada yapılıyor
+                        fdStr = JSON.stringify(fdObj);
+                    } catch(e){}
+                    finalNotes = finalNotes + (finalNotes ? "\n\n" : "") + "_###FLIGHT_DATA###_" + fdStr;
+                }
+            }
+            return finalNotes;
+        })(),
         firstName: String(candForm.firstName || "").trim().toLocaleUpperCase("tr-TR"),
         lastName: String(candForm.lastName || "").trim().toLocaleUpperCase("tr-TR"),
         fatherName: String(candForm.fatherName || "").trim().toLocaleUpperCase("tr-TR"),
@@ -512,6 +610,72 @@ export default function Dashboard() {
       const err = await res.json();
       setMinistryError(err.error || "Bakanlık bilgileri kaydedilemedi.");
       logAudit("BAKANLIK_KAYIT_HATA", `${ministryCandidate.firstName} ${ministryCandidate.lastName}: ${err.error}`);
+    }
+  };
+
+  const openTicketModal = (c: any) => {
+    setTicketCandidate(c);
+    setTicketStatus(["Bilet Alındı", "Bilet Zamanı Geldi (Durum Bilinmiyor)", "Şirkette Çalışıyor"].includes(c.status) ? c.status : "Bilet Bekliyor");
+    setTicketError("");
+    
+    let parsed = { flightNo: "", depLocation: "", depDate: "", depTime: "", arrLocation: "", arrDate: "", arrTime: "", isConnecting: false, connLocation: "", connArrDate: "", connArrTime: "", connDepDate: "", connDepTime: "", connDuration: "" };
+    
+    // Veriyi gizli kısımdan güvenle çekiyoruz
+    if (c.notes && c.notes.includes('_###FLIGHT_DATA###_')) {
+      try { parsed = JSON.parse(c.notes.split('_###FLIGHT_DATA###_')[1].trim()); } catch(e) {}
+    }
+    
+    parsed = { flightNo: "", depLocation: "", depDate: "", depTime: "", arrLocation: "", arrDate: "", arrTime: "", isConnecting: false, connLocation: "", connArrDate: "", connArrTime: "", connDepDate: "", connDepTime: "", connDuration: "", ...parsed };
+    setTicketFlightInfo(parsed);
+  };
+
+  const handleSaveTicket = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setTicketError("");
+    
+    if ((ticketStatus === "Bilet Alındı" || ticketStatus === "Bilet Zamanı Geldi (Durum Bilinmiyor)")) {
+      const { flightNo, depLocation, depDate, depTime, arrLocation, arrDate, arrTime, isConnecting, connLocation, connArrDate, connArrTime, connDepDate, connDepTime, connDuration } = ticketFlightInfo;
+      if (!flightNo || !depLocation || !depDate || !depTime || !arrLocation || !arrDate || !arrTime) {
+        setTicketError("Lütfen uçuş, kalkış ve iniş bilgilerini eksiksiz doldurun!");
+        return;
+      }
+      if (isConnecting && (!connLocation || !connArrDate || !connArrTime || !connDepDate || !connDepTime || !connDuration)) {
+        setTicketError("Lütfen aktarma bilgilerini eksiksiz doldurun!");
+        return;
+      }
+    }
+
+    let cleanNotes = ticketCandidate.notes || "";
+    if (cleanNotes.includes('_###FLIGHT_DATA###_')) {
+        cleanNotes = cleanNotes.split('_###FLIGHT_DATA###_')[0].trim();
+    }
+    cleanNotes = cleanNotes.replace(/\[UÇUŞ BİLGİSİ\][\s\S]*/g, '').trim();
+
+    let newNotes = cleanNotes;
+    if ((ticketStatus === "Bilet Alındı" || ticketStatus === "Bilet Zamanı Geldi (Durum Bilinmiyor)") || ticketStatus === "Şirkette Çalışıyor") {
+        const flightDataToSave = { ...ticketFlightInfo, uiStatus: ticketStatus };
+        newNotes = cleanNotes + (cleanNotes ? "\n\n" : "") + "_###FLIGHT_DATA###_" + JSON.stringify(flightDataToSave);
+    }
+
+    const payload = {
+        ...ticketCandidate,
+        status: (ticketStatus === "Bilet Alındı" || ticketStatus === "Bilet Zamanı Geldi (Durum Bilinmiyor)") ? "Bilet Bekliyor" : ticketStatus,
+        notes: newNotes
+    };
+    delete payload.flightDetails;
+
+    const res = await fetch(`/api/candidates/${ticketCandidate.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    if (res.ok) {
+      setTicketCandidate(null);
+      fetchData();
+    } else {
+      const err = await res.json();
+      setTicketError(err.error || "Bilet durumu kaydedilemedi.");
     }
   };
 
@@ -703,6 +867,20 @@ export default function Dashboard() {
             Bakanlık Sürecinde
           </span>
         );
+      case "Bilet Zamanı Geldi (Durum Bilinmiyor)":
+        return (
+          <span className="text-xs px-2.5 py-1 rounded-lg bg-red-500/15 border border-red-500/30 text-red-400 font-bold flex items-center gap-1.5 whitespace-nowrap shadow-[0_0_10px_rgba(239,68,68,0.2)]">
+            <AlertCircle className="w-3.5 h-3.5 shrink-0 text-red-400" />
+            Zamanı Geldi (Bilinmiyor)
+          </span>
+        );
+      case "Bilet Alındı":
+        return (
+          <span className="text-xs px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 font-bold flex items-center gap-1.5 whitespace-nowrap shadow-[0_0_10px_rgba(16,185,129,0.2)]">
+            <Ticket className="w-3.5 h-3.5 shrink-0 text-emerald-400" />
+            Bilet Alındı
+          </span>
+        );
       case "Bilet Bekliyor":
         return (
           <span className="text-xs px-2.5 py-1 rounded-lg bg-purple-500/15 border border-purple-500/30 text-purple-300 font-bold flex items-center gap-1.5 whitespace-nowrap shadow-[0_0_10px_rgba(168,85,247,0.2)]">
@@ -786,18 +964,22 @@ export default function Dashboard() {
 
               <button onClick={() => setActiveTab("fee_payments")} className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${activeTab === "fee_payments" ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
                 <div className="flex items-center gap-2.5"><CreditCard className="w-4 h-4 text-emerald-400" /><span>Harç Ödemeleri</span></div>
-                {feePaymentCandidates.length > 0 && <span className={`px-2 py-0.5 rounded-lg text-xs font-bold transition-all duration-300 ${activeTab === 'fee_payments' ? 'bg-amber-500 text-white shadow-md shadow-amber-500/20' : 'bg-slate-800 text-slate-500'}`}>{feePaymentCandidates.length}</span>}
+                <span className={`text-xs px-2 py-0.5 rounded-md ${activeTab === "fee_payments" ? "bg-emerald-700 text-white" : "bg-slate-800 text-slate-400"}`}>{feePaymentCandidates.length}</span>
               </button>
 
               <button onClick={() => setActiveTab("ticketsWaiting")} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200 ${activeTab === "ticketsWaiting" ? "bg-sky-500 text-white shadow-sm" : "text-slate-400 hover:bg-slate-800/50 hover:text-slate-300"}`}>
                 <Ticket className="w-[18px] h-[18px] shrink-0" />
                 <span className="font-medium text-[15px] whitespace-nowrap flex-1 text-left">Bilet Bekleyenler</span>
-                <span className={`ml-auto py-0.5 px-2 rounded-lg text-xs font-medium ${activeTab === "ticketsWaiting" ? "bg-white/20 text-white" : "bg-slate-800 text-slate-400"}`}>{candidates.filter((c) => c.status === "Bilet Bekliyor").length}</span>
+                <span className={`ml-auto py-0.5 px-2 rounded-lg text-xs font-medium ${activeTab === "ticketsWaiting" ? "bg-white/20 text-white" : "bg-slate-800 text-slate-400"}`}>{candidates.filter((c) => c.status === "Bilet Bekliyor" || c.status === "Bilet Alındı" || c.status === "Bilet Zamanı Geldi (Durum Bilinmiyor)").length}</span>
               </button>
 
               <button onClick={() => setActiveTab("expiring_refs")} className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${activeTab === "expiring_refs" ? "bg-amber-600 text-white shadow-lg shadow-amber-600/20" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
                 <div className="flex items-center gap-2.5"><Clock className="w-4 h-4 text-amber-400" /><span>Süresi Yaklaşan Refler</span></div>
-                {expiringCandidates.length > 0 && <span className={`text-xs font-bold px-2 py-0.5 rounded-full text-white ${expiringCandidates.some(c => (getRemainingDays(c.refExpiryDate) || 0) <= 3) ? "bg-red-500 animate-pulse" : "bg-amber-500"}`}>{expiringCandidates.length}</span>}
+                {expiringCandidates.length > 0 ? (
+                  <span className={`text-xs font-bold px-2 py-0.5 rounded-full text-white ${expiringCandidates.some(c => (getRemainingDays(c.refExpiryDate) || 0) <= 3) ? "bg-red-500 animate-pulse" : "bg-amber-500"}`}>{expiringCandidates.length}</span>
+                ) : (
+                  <span className="text-xs px-2 py-0.5 rounded-md bg-slate-800 text-slate-400">0</span>
+                )}
               </button>
               
               <button onClick={() => setActiveTab("expired")} className={`w-full flex items-center justify-between p-2 pl-4 rounded-xl transition-all font-medium ${activeTab === "expired" ? "bg-red-500/10 text-red-400 border border-red-500/20" : "text-slate-500 hover:bg-slate-900 hover:text-red-400 border border-transparent"}`}>
@@ -811,7 +993,11 @@ export default function Dashboard() {
                 <div className="px-3 pb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">Sistem Yönetimi</div>
                 <button onClick={() => setActiveTab("logs")} className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${activeTab === "logs" ? "bg-red-600 text-white shadow-lg shadow-red-600/20" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
                   <div className="flex items-center gap-2.5"><BellRing className="w-4 h-4 text-red-400" /><span>Yetkili Bildirimleri</span></div>
-                  {logsList.length > 0 && <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-500 text-white animate-pulse">{logsList.length}</span>}
+                  {logsList.length > 0 ? (
+                    <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-500 text-white animate-pulse">{logsList.length}</span>
+                  ) : (
+                    <span className="text-xs px-2 py-0.5 rounded-md bg-slate-800 text-slate-400">0</span>
+                  )}
                 </button>
                 <button onClick={() => setActiveTab("users")} className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${activeTab === "users" ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
                   <div className="flex items-center gap-2.5"><UserCog className="w-4 h-4" /><span>Kullanıcılar</span></div>
@@ -1428,13 +1614,15 @@ export default function Dashboard() {
 
 
           
+          
+          
           {/* BİLET BEKLEYENLER SEKMESİ */}
           {activeTab === "ticketsWaiting" && (
             <div className="space-y-6">
               <div className="flex items-center justify-between">
                 <div>
-                  <h2 className="text-2xl font-bold text-white tracking-tight">Bilet Bekleyenler</h2>
-                  <p className="text-slate-400 text-sm mt-0.5">Bakanlık onayı almış ve uçuş organizasyonu bekleyen personeller.</p>
+                  <h2 className="text-2xl font-bold text-white tracking-tight">Bilet İşlemleri</h2>
+                  <p className="text-slate-400 text-sm mt-0.5">Bakanlık onayı almış ve uçuş organizasyonu bekleyen / biletlenen personeller.</p>
                 </div>
               </div>
 
@@ -1448,11 +1636,12 @@ export default function Dashboard() {
                         <th className="px-6 py-4 cursor-pointer hover:text-white transition-colors" onClick={() =>setCandidateSort(prev =>({ column: "company", direction: prev.column === "company" && prev.direction === "asc" ? "desc" : "asc" }))}>Şirket {candidateSort.column === "company" && (candidateSort.direction === "asc" ? "▲" : "▼")}</th>
                         <th className="px-6 py-4">Bakanlık Durumu</th>
                         <th className="px-6 py-4">Süreç Durumu</th>
+                        <th className="px-6 py-4 cursor-pointer hover:text-white transition-colors whitespace-nowrap" onClick={() =>setCandidateSort(prev =>({ column: "arrDate", direction: prev.column === "arrDate" && prev.direction === "asc" ? "desc" : "asc" }))}>İniş Tarihi {candidateSort.column === "arrDate" && (candidateSort.direction === "asc" ? "▲" : "▼")}</th>
                         <th className="px-6 py-4 text-right">İşlemler</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/60">
-                      {sortData(candidates.filter((c: any) =>c.status === "Bilet Bekliyor"), candidateSort).map((c: any) => (
+                      {sortData(candidates.filter((c: any) => c.status === "Bilet Bekliyor" || c.status === "Bilet Alındı" || c.status === "Bilet Zamanı Geldi (Durum Bilinmiyor)"), candidateSort).map((c: any) => (
                         <tr key={c.id} className="hover:bg-slate-800/30 transition-colors">
                           <td className="px-5 py-4">
                             <span className="font-mono text-xs px-2.5 py-1 rounded-lg bg-sky-500/10 border border-sky-500/20 text-sky-400 font-bold whitespace-nowrap inline-flex items-center">
@@ -1470,9 +1659,45 @@ export default function Dashboard() {
                               </span>
                           </td>
                           <td className="px-6 py-4">
-                            <span className="inline-flex items-center px-3 py-1 rounded-lg bg-sky-500/20 border border-sky-500/40 text-sky-300 text-xs font-bold">
-                              Bilet Bekliyor
-                            </span>
+                            {c.status === "Bilet Zamanı Geldi (Durum Bilinmiyor)" ? (
+                              <span className="inline-flex items-center px-3 py-1 rounded-lg bg-red-500/20 border border-red-500/40 text-red-400 text-xs font-bold shadow-[0_0_10px_rgba(239,68,68,0.1)]">
+                                <AlertCircle className="w-3.5 h-3.5 mr-1.5" /> Zamanı Geldi
+                              </span>
+                            ) : c.status === "Bilet Alındı" ? (
+                              <span className="inline-flex items-center px-3 py-1 rounded-lg bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 text-xs font-bold shadow-[0_0_10px_rgba(16,185,129,0.1)]">
+                                <Plane className="w-3.5 h-3.5 mr-1.5" /> Bilet Alındı
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center px-3 py-1 rounded-lg bg-sky-500/20 border border-sky-500/40 text-sky-300 text-xs font-bold">
+                                <Ticket className="w-3.5 h-3.5 mr-1.5" /> Bilet Bekliyor
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-6 py-4">
+                            {(() => {
+                              let fDate = "";
+                              if (c.notes && c.notes.includes('_###FLIGHT_DATA###_')) {
+                                try { 
+                                  const fd = JSON.parse(c.notes.split('_###FLIGHT_DATA###_')[1].trim()); 
+                                  if(fd.arrDate) fDate = fd.arrDate;
+                                } catch(e){}
+                              }
+                              if (fDate) {
+                                let days = getRemainingDays(fDate);
+                                let colorClass = "text-emerald-400 bg-emerald-500/10 border-emerald-500/20";
+                                if (days !== null) {
+                                  if (days < 0) colorClass = "text-red-400 bg-red-500/20 border-red-500/40 shadow-[0_0_10px_rgba(239,68,68,0.3)]"; // Tarihi geçmiş
+                                  else if (days <= 3) colorClass = "text-red-400 bg-red-500/15 border-red-500/30 animate-pulse shadow-[0_0_10px_rgba(239,68,68,0.2)]"; // 3 gün veya az kaldı
+                                  else if (days <= 5) colorClass = "text-amber-400 bg-amber-500/15 border-amber-500/30 shadow-[0_0_10px_rgba(245,158,11,0.1)]"; // 4-5 gün kaldı
+                                }
+                                return (
+                                  <span className={`font-mono font-bold whitespace-nowrap px-3 py-1.5 rounded-lg border ${colorClass}`}>
+                                    {fDate.split("-").reverse().join(".")}
+                                  </span>
+                                );
+                              }
+                              return <span className="text-xs text-slate-500 italic">-</span>;
+                            })()}
                           </td>
                           <td className="px-6 py-4 text-right">
                             <div className="flex items-center justify-end gap-1.5">
@@ -1484,14 +1709,39 @@ export default function Dashboard() {
                               >
                                 <Eye className="w-4 h-4" />
                               </button>
+                              <button
+                                type="button"
+                                onClick={() =>{
+                                  setCandForm({
+                                    ...c,
+                                    passportExpiry: c.passportExpiry ? String(c.passportExpiry).split('T')[0] : "",
+                                    appDate: c.appDate ? String(c.appDate).split('T')[0] : "",
+                                    refExpiryDate: c.refExpiryDate ? String(c.refExpiryDate).split('T')[0] : ""
+                                  });
+                                  setEditingCandidateId(c.id);
+                                  setShowCandidateModal(true);
+                                }}
+                                className="p-2 rounded-lg text-slate-400 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors cursor-pointer"
+                                title="Personel Bilgilerini Düzenle"
+                              >
+                                <Edit3 className="w-4 h-4" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => openTicketModal(c)}
+                                className="p-2 rounded-lg text-slate-400 hover:text-sky-400 hover:bg-sky-500/10 transition-colors cursor-pointer"
+                                title="Bilet İşlemleri"
+                              >
+                                <Plane className="w-4 h-4" />
+                              </button>
                             </div>
                           </td>
                         </tr>
                       ))}
-                      {candidates.filter((c: any) =>c.status === "Bilet Bekliyor").length === 0 && (
+                      {candidates.filter((c: any) => c.status === "Bilet Bekliyor" || c.status === "Bilet Alındı" || c.status === "Bilet Zamanı Geldi (Durum Bilinmiyor)").length === 0 && (
                         <tr>
-                          <td colSpan={6} className="text-center py-12 text-slate-500">
-                            Bilet bekleyen personel bulunmuyor.
+                          <td colSpan={7} className="text-center py-12 text-slate-500">
+                            Bilet işlemi bekleyen personel bulunmuyor.
                           </td>
                         </tr>)}
                     </tbody>
@@ -1500,7 +1750,6 @@ export default function Dashboard() {
               </div>
             </div>
           )}
-
 
           {/* ŞİRKETLER */}
           {activeTab === "companies" && (
@@ -1817,12 +2066,76 @@ export default function Dashboard() {
                 </div>
               </div>
 
-              {viewCandidate.notes && (
-                <div className="bg-slate-950/60 p-4 rounded-xl border border-slate-800/80 space-y-1.5 md:col-span-2">
-                  <div className="text-xs font-bold text-amber-400 uppercase tracking-wider mb-1">Özel Notlar</div>
-                  <p className="text-slate-300 italic whitespace-pre-line text-xs">{viewCandidate.notes}</p>
-                </div>
-              )}
+              
+              {(() => {
+                try {
+                  let flight = null;
+                  if (viewCandidate.notes && viewCandidate.notes.includes('_###FLIGHT_DATA###_')) {
+                      try { flight = JSON.parse(viewCandidate.notes.split('_###FLIGHT_DATA###_')[1].trim()); } catch(e) {}
+                  }
+                  if (!flight || !flight.flightNo) return null;
+                  
+                  return (
+                    <div className="bg-sky-950/20 border border-sky-500/30 p-4 rounded-xl space-y-4 md:col-span-2 animate-in fade-in zoom-in duration-200">
+                      <div className="text-xs font-bold text-sky-400 uppercase tracking-wider flex items-center gap-1.5 mb-2 border-b border-sky-500/20 pb-2">
+                        <Plane className="w-4 h-4" /> Uçuş ve Bilet Bilgileri
+                      </div>
+                      
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                        <div className="space-y-1.5">
+                          <span className="text-slate-400 text-xs font-medium block">Uçuş Numarası</span>
+                          <span className="font-mono text-white font-bold text-sm bg-sky-500/20 px-2.5 py-1 rounded-lg border border-sky-500/30 inline-flex items-center shadow-sm">{flight.flightNo}</span>
+                        </div>
+                        <div className="space-y-1">
+                          <span className="text-amber-400/90 text-xs font-bold block flex items-center gap-1 mb-1"><MapPin className="w-3 h-3"/> Kalkış Bilgisi</span>
+                          <div className="text-slate-200 text-sm font-semibold">{flight.depLocation}</div>
+                          <div className="text-slate-400 text-xs font-mono">{flight.depDate ? flight.depDate.split("-").reverse().join(".") : ""} - {flight.depTime}</div>
+                        </div>
+                        <div className="space-y-1">
+                          <span className="text-emerald-400/90 text-xs font-bold block flex items-center gap-1 mb-1"><MapPin className="w-3 h-3"/> İniş Bilgisi</span>
+                          <div className="text-slate-200 text-sm font-semibold">{flight.arrLocation}</div>
+                          <div className="text-slate-400 text-xs font-mono">{flight.arrDate ? flight.arrDate.split("-").reverse().join(".") : ""} - {flight.arrTime}</div>
+                        </div>
+                      </div>
+
+                      {flight.isConnecting && (
+                        <div className="mt-2 p-3.5 bg-slate-900/60 rounded-xl border border-slate-700/60 grid grid-cols-1 sm:grid-cols-2 gap-4 shadow-inner">
+                          <div className="space-y-1">
+                            <span className="text-sky-400/80 text-xs font-bold block flex items-center gap-1 mb-1"><Plane className="w-3 h-3"/> Aktarma Yeri & Bekleme</span>
+                            <div className="text-slate-200 text-sm font-medium">{flight.connLocation}</div>
+                            <div className="text-slate-400 text-xs font-mono">{flight.connDuration} Saat Bekleme</div>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                             <div className="space-y-1 border-l border-slate-800 pl-3">
+                               <span className="text-slate-500 text-[10px] uppercase font-bold block">İniş Saati</span>
+                               <div className="text-slate-300 text-xs font-mono">{flight.connArrDate ? flight.connArrDate.split("-").reverse().join(".") : ""}</div>
+                               <div className="text-white text-xs font-mono font-bold">{flight.connArrTime}</div>
+                             </div>
+                             <div className="space-y-1 border-l border-slate-800 pl-3">
+                               <span className="text-slate-500 text-[10px] uppercase font-bold block">Kalkış Saati</span>
+                               <div className="text-slate-300 text-xs font-mono">{flight.connDepDate ? flight.connDepDate.split("-").reverse().join(".") : ""}</div>
+                               <div className="text-white text-xs font-mono font-bold">{flight.connDepTime}</div>
+                             </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                } catch (e) {
+                  return null;
+                }
+              })()}
+
+              {(() => {
+                const cleanNotes = viewCandidate.notes ? viewCandidate.notes.split('_###FLIGHT_DATA###_')[0].replace(/\[UÇUŞ BİLGİSİ\][\s\S]*/g, '').trim() : "";
+                if (!cleanNotes) return null;
+                return (
+                  <div className="bg-slate-950/60 p-4 rounded-xl border border-slate-800/80 space-y-1.5 md:col-span-2">
+                    <div className="text-xs font-bold text-amber-400 uppercase tracking-wider mb-1">Özel Notlar</div>
+                    <p className="text-slate-300 italic whitespace-pre-line text-xs">{cleanNotes}</p>
+                  </div>
+                );
+              })()}
             </div>
 
             <div className="flex justify-end gap-3 pt-4 border-t border-slate-800 mt-5">
@@ -1962,7 +2275,7 @@ export default function Dashboard() {
 
               <div>
                 <label className="block text-xs font-medium text-slate-300 mb-1">Ek Notlar</label>
-                <textarea value={candForm.notes || ""} onChange={(e) => setCandForm({...candForm, notes: e.target.value})} rows={2} className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-white resize-none" />
+                <textarea value={candForm.notes ? candForm.notes.split('_###FLIGHT_DATA###_')[0].replace(/\[UÇUŞ BİLGİSİ\][\s\S]*/g, '').trim() : ""} onChange={(e) => setCandForm({...candForm, notes: e.target.value})} rows={2} className="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 text-white resize-none" />
               </div>
 
               <div className="flex justify-end gap-3 pt-4 border-t border-slate-800">
@@ -2739,6 +3052,170 @@ export default function Dashboard() {
                 </button>
                 <button type="submit" className="bg-red-600 hover:bg-red-500 text-white px-6 py-2.5 rounded-xl font-medium shadow-lg shadow-red-600/20 cursor-pointer">
                   Bakanlık Durumunu Kaydet
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      
+      {/* BİLET DURUMU MODAL */}
+      {ticketCandidate && (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div 
+            onClick={(e) =>e.stopPropagation()}
+            className={`relative w-full transform rounded-3xl bg-slate-900 p-6 sm:p-8 text-left shadow-2xl border border-slate-800 my-8 transition-all duration-300 ${(ticketStatus === 'Bilet Alındı' || ticketStatus === 'Bilet Zamanı Geldi (Durum Bilinmiyor)') ? 'max-w-2xl' : 'max-w-md'}`}
+          >
+            <div className="flex items-center justify-between border-b border-slate-800 pb-4 mb-5">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 rounded-2xl bg-sky-500/10 border border-sky-500/20 text-sky-400 whitespace-nowrap inline-flex items-center">
+                  <Plane className="w-6 h-6" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold text-white">Bilet Durumu İşlemleri</h2>
+                  <p className="text-xs text-slate-400">#prs{ticketCandidate.registrationNo} • {ticketCandidate.firstName} {ticketCandidate.lastName}</p>
+                </div>
+              </div>
+
+              <button 
+                type="button"
+                onClick={() =>setTicketCandidate(null)} 
+                className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {ticketError && (
+              <div className="p-3 bg-red-500/10 border border-red-500/20 text-red-400 text-xs rounded-xl mb-4 whitespace-nowrap inline-flex items-center">
+                {ticketError}
+              </div>
+            )}
+
+            <form onSubmit={handleSaveTicket} className="space-y-4 text-sm">
+              <div>
+                <label className="block text-xs font-medium text-slate-300 mb-2">Bilet ve Süreç Durumu Seçimi</label>
+                <select 
+                  value={ticketStatus} 
+                  onChange={(e) =>setTicketStatus(e.target.value)} 
+                  className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-white font-medium focus:border-sky-500 focus:outline-none transition-colors" 
+                >
+                  <option value="Bilet Bekliyor">Bilet Bekliyor</option>
+                  <option value="Bilet Alındı">Bilet Alındı</option>
+                    <option value="Bilet Zamanı Geldi (Durum Bilinmiyor)">Bilet Zamanı Geldi (Durum Bilinmiyor)</option>
+                  <option value="Şirkette Çalışıyor">Şirkette Çalışıyor</option>
+                </select>
+                <p className="text-[11px] text-slate-500 mt-2">
+                  Not: "Şirkette Çalışıyor" seçildiğinde personel bu sekmeden düşer ve ana listede şirkete atanmış olarak görünür.
+                </p>
+              </div>
+
+              {(ticketStatus === "Bilet Alındı" || ticketStatus === "Bilet Zamanı Geldi (Durum Bilinmiyor)") && (
+                <div className="mt-5 p-5 border border-sky-500/30 bg-sky-950/40 rounded-2xl space-y-4 animate-in fade-in zoom-in duration-200 max-h-[50vh] overflow-y-auto overflow-x-hidden custom-scrollbar">
+                  <h4 className="text-sm font-bold text-sky-400 uppercase tracking-wider flex items-center gap-2 mb-1 border-b border-sky-500/20 pb-2">
+                    <Plane className="w-4 h-4"/> Uçuş ve Bilet Detayları
+                  </h4>
+                  
+                  <div>
+                    <label className="block text-xs font-medium text-slate-300 mb-1">Uçuş Numarası (Flight No) *</label>
+                    <input required value={ticketFlightInfo.flightNo || ""} onChange={(e) => setTicketFlightInfo({...ticketFlightInfo, flightNo: e.target.value.toLocaleUpperCase('tr-TR')})} className="w-full bg-slate-900 border border-slate-700 focus:border-sky-500 rounded-xl p-2.5 text-white font-mono placeholder-slate-600 outline-none transition-all" placeholder="Örn: TK1903" />
+                  </div>
+
+                  <div className="flex items-center gap-2 bg-slate-900/50 p-3 rounded-xl border border-slate-800">
+                    <input type="checkbox" id="connCheck" checked={ticketFlightInfo.isConnecting || false} onChange={(e) => setTicketFlightInfo({...ticketFlightInfo, isConnecting: e.target.checked})} className="w-4 h-4 accent-sky-500 rounded cursor-pointer" />
+                    <label htmlFor="connCheck" className="text-xs font-bold text-sky-300 cursor-pointer select-none">
+                       Aktarmalı Uçuş (Transit Flight)
+                    </label>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    {/* Kalkış */}
+                    <div className="space-y-3 p-3.5 bg-slate-900/80 rounded-xl border border-slate-700/80 shadow-inner">
+                      <div className="text-xs font-bold text-amber-400 flex items-center gap-1.5"><MapPin className="w-3.5 h-3.5"/> Kalkış Bilgileri</div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-slate-400 mb-1">Kalkış Yeri (Havalimanı) *</label>
+                        <input required value={ticketFlightInfo.depLocation || ""} onChange={(e) => setTicketFlightInfo({...ticketFlightInfo, depLocation: toTitleCase(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-lg p-2 text-white text-xs outline-none transition-all" placeholder="Örn: İslamabad (ISB)" />
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[11px] font-medium text-slate-400 mb-1">Kalkış Tarihi *</label>
+                          <input type="date" required value={ticketFlightInfo.depDate || ""} onChange={(e) => setTicketFlightInfo({...ticketFlightInfo, depDate: e.target.value})} className="w-full bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-lg p-2 text-white text-xs outline-none transition-all" />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-medium text-slate-400 mb-1">Kalkış Saati *</label>
+                          <input type="time" required value={ticketFlightInfo.depTime || ""} onChange={(e) => setTicketFlightInfo({...ticketFlightInfo, depTime: e.target.value})} className="w-full bg-slate-950 border border-slate-700 focus:border-amber-500 rounded-lg p-2 text-white text-xs font-mono outline-none transition-all" />
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* İniş */}
+                    <div className="space-y-3 p-3.5 bg-slate-900/80 rounded-xl border border-slate-700/80 shadow-inner">
+                      <div className="text-xs font-bold text-emerald-400 flex items-center gap-1.5"><MapPin className="w-3.5 h-3.5"/> İniş Bilgileri</div>
+                      <div>
+                        <label className="block text-[11px] font-medium text-slate-400 mb-1">İniş Yeri (Havalimanı) *</label>
+                        <input required value={ticketFlightInfo.arrLocation || ""} onChange={(e) => setTicketFlightInfo({...ticketFlightInfo, arrLocation: toTitleCase(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-lg p-2 text-white text-xs outline-none transition-all" placeholder="Örn: İstanbul (IST)" />
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-[11px] font-medium text-slate-400 mb-1">İniş Tarihi *</label>
+                          <input type="date" required value={ticketFlightInfo.arrDate || ""} onChange={(e) => setTicketFlightInfo({...ticketFlightInfo, arrDate: e.target.value})} className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-lg p-2 text-white text-xs outline-none transition-all" />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-medium text-slate-400 mb-1">İniş Saati *</label>
+                          <input type="time" required value={ticketFlightInfo.arrTime || ""} onChange={(e) => setTicketFlightInfo({...ticketFlightInfo, arrTime: e.target.value})} className="w-full bg-slate-950 border border-slate-700 focus:border-emerald-500 rounded-lg p-2 text-white text-xs font-mono outline-none transition-all" />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                  
+                  {/* Aktarma Bölümü */}
+                  {ticketFlightInfo.isConnecting && (
+                    <div className="space-y-3 p-4 bg-sky-950/60 rounded-xl border border-sky-500/50 shadow-inner animate-in slide-in-from-top-2">
+                      <div className="text-xs font-bold text-sky-400 flex items-center gap-1.5"><Plane className="w-3.5 h-3.5"/> Aktarma Bilgileri</div>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-3 mb-3">
+                        <div>
+                          <label className="block text-[11px] font-medium text-slate-400 mb-1">Aktarma Yeri (Havalimanı) *</label>
+                          <input required={ticketFlightInfo.isConnecting} value={ticketFlightInfo.connLocation || ""} onChange={(e) => setTicketFlightInfo({...ticketFlightInfo, connLocation: toTitleCase(e.target.value)})} className="w-full bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-lg p-2.5 text-white text-xs outline-none transition-all" placeholder="Örn: Doha (DOH)" />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-medium text-slate-400 mb-1">Aktarma Bekleme Süresi (Saat) *</label>
+                          <input type="time" required={ticketFlightInfo.isConnecting} value={ticketFlightInfo.connDuration || ""} onChange={(e) => setTicketFlightInfo({...ticketFlightInfo, connDuration: e.target.value})} className="w-full bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-lg p-2.5 text-white text-xs font-mono outline-none transition-all" />
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                        <div>
+                          <label className="block text-[10px] font-medium text-slate-400 mb-1">Aktarma İniş Tarihi</label>
+                          <input type="date" required={ticketFlightInfo.isConnecting} value={ticketFlightInfo.connArrDate || ""} onChange={(e) => setTicketFlightInfo({...ticketFlightInfo, connArrDate: e.target.value})} className="w-full bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-lg p-2 text-white text-xs outline-none" />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-medium text-slate-400 mb-1">Aktarma İniş Saati</label>
+                          <input type="time" required={ticketFlightInfo.isConnecting} value={ticketFlightInfo.connArrTime || ""} onChange={(e) => setTicketFlightInfo({...ticketFlightInfo, connArrTime: e.target.value})} className="w-full bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-lg p-2 text-white text-xs font-mono outline-none" />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-medium text-slate-400 mb-1">Aktarma Kalkış Tarihi</label>
+                          <input type="date" required={ticketFlightInfo.isConnecting} value={ticketFlightInfo.connDepDate || ""} onChange={(e) => setTicketFlightInfo({...ticketFlightInfo, connDepDate: e.target.value})} className="w-full bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-lg p-2 text-white text-xs outline-none" />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-medium text-slate-400 mb-1">Aktarma Kalkış Saati</label>
+                          <input type="time" required={ticketFlightInfo.isConnecting} value={ticketFlightInfo.connDepTime || ""} onChange={(e) => setTicketFlightInfo({...ticketFlightInfo, connDepTime: e.target.value})} className="w-full bg-slate-950 border border-slate-700 focus:border-sky-500 rounded-lg p-2 text-white text-xs font-mono outline-none" />
+                        </div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="flex justify-end gap-3 pt-4 border-t border-slate-800 mt-6">
+                <button 
+                  type="button" 
+                  onClick={() =>setTicketCandidate(null)} 
+                  className="px-5 py-2.5 text-slate-400 hover:text-white cursor-pointer"
+                >
+                  İptal
+                </button>
+                <button type="submit" className="bg-sky-600 hover:bg-sky-500 text-white px-6 py-2.5 rounded-xl font-medium shadow-lg shadow-sky-600/20 cursor-pointer">
+                  Durumu Kaydet
                 </button>
               </div>
             </form>
