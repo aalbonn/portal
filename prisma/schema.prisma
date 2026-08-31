@@ -1,0 +1,108 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  nickname  String?
+  password  String
+  role      String   @default("VIEWER")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  logs      AuditLog[]
+}
+
+model Company {
+  id              String      @id @default(cuid())
+  name            String
+  officialName    String?
+  taxNumber       String
+  taxOffice       String
+  companyAddress  String?
+  workAddress     String?
+  contactName     String?
+  contactTitle    String?
+  referralPerson  String?
+  phone           String?
+  email           String?
+  notes           String?
+  createdByName   String?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  candidates      Candidate[] 
+}
+
+model Candidate {
+  id               String    @id @default(cuid())
+  registrationNo   Int?      @unique
+  firstName        String
+  lastName         String
+  fatherName       String
+  motherName       String?
+  spouseName       String?
+  gender           String    @default("Erkek")
+  birthDate        DateTime?
+  nationality      String    @default("Pakistan")
+  passportNo       String    @unique
+  passportExpiry   DateTime?
+  profession       String
+  agency           String?
+  salary           String?   @default("33.030,00")
+  phone            String?
+  status           String    @default("Sözleşme Gönderildi")
+  notes            String?
+
+  refNumber        String?
+  refExpiryDate    DateTime?
+  appNumber        String?
+  appDate          DateTime?
+  appStatus        String?   @default("Beklemede")
+  foreignIdNo String?
+  feeDate String?
+  feeExpiryDate String?
+  
+  createdByName    String?   @default("Sistem")
+  appCreatedByName String?
+
+  companyId        String
+  company          Company   @relation(fields: [companyId], references: [id])
+
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  birthPlace    String?
+  cnicNo        String?
+}
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  userName    String
+  userEmail   String
+  action      String
+  details     String
+  ipAddress   String?
+  createdAt   DateTime @default(now())
+
+  userId      String?
+  user        User?    @relation(fields: [userId], references: [id])
+}
+
+model Demand {
+  id             String   @id @default(cuid())
+  companyName    String
+  professions    String
+  headCount      Int
+  requesterName  String
+  requesterPhone String   @default("")
+  cityName       String
+  createdByName  String   @default("Sistem")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
