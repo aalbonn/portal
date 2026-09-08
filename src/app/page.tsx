@@ -1,8 +1,9 @@
 "use client";
-import { Eye, Plane, UserCheck, UserClock, Landmark, AlertTriangle, HelpCircle, MapPin, FileCheck, Edit3, ShieldCheck, UserCog, BellRing, Clock, CreditCard, Users, Pencil, Trash2, Plus, X, Building2, Briefcase, FileText, CheckCircle2, AlertCircle, Search, Filter, ArrowUpDown, ChevronDown, LogOut, Eraser, Sparkles, Globe, Ticket, IdCard, User, Lock, ShieldAlert, BadgeCheck, Mail, KeyRound } from "lucide-react";
+import { FileSearch, RotateCcw, Download, FileSpreadsheet, Eye, Plane, UserCheck, UserClock, Landmark, AlertTriangle, HelpCircle, MapPin, FileCheck, Edit3, ShieldCheck, UserCog, BellRing, Clock, CreditCard, Users, Pencil, Trash2, Plus, X, Building2, Briefcase, FileText, CheckCircle2, AlertCircle, Search, Filter, ArrowUpDown, ChevronDown, LogOut, Eraser, Sparkles, Globe, Ticket, IdCard, User, Lock, ShieldAlert, BadgeCheck, Mail, KeyRound } from "lucide-react";
 import { useSession, signOut } from "next-auth/react";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
+import * as XLSX from "xlsx";
 
 function toTitleCase(str: string) {
   if (!str) return "";
@@ -16,7 +17,7 @@ export default function Dashboard() {
   const isSuperAdmin = (session?.user as any)?.role === "SUPER_ADMIN";
   const currentUserDisplayName = (session?.user as any)?.nickname || session?.user?.name || "Yetkili";
 
-  const [activeTab, setActiveTab] = useState<"candidates" | "companies" | "demands" | "expiring_refs" | "fee_payments" | "users" | "logs" | "expired">("candidates");
+  const [activeTab, setActiveTab] = useState<"candidates" | "companies" | "demands" | "expiring_refs" | "fee_payments" | "users" | "logs" | "expired" | "exports" | "evaluation">("candidates");
   const [search, setSearch] = useState("");
   const [candidates, setCandidates] = useState<any[]>([]);
   const [companies, setCompanies] = useState<any[]>([]);
@@ -132,11 +133,17 @@ export default function Dashboard() {
     if (!c.refNumber || !c.refExpiryDate) return false;
     if (c.appNumber && c.appNumber.trim() !== "") return false;
     const days = getRemainingDays(c.refExpiryDate);
-    return days !== null && days <= 5;
+    return days !== null && days >= 0 && days <= 5;
   });
 
   const feePaymentCandidates = candidates.filter((c: any) =>c.status === "Harç Ödemesi");
-  const pendingEntryCandidates = candidates.filter((c: any) =>c.status === "Giriş Bekleniyor" || c.status === "Giriş bekleniyor");
+  const evaluationCandidates = (candidates || []).filter((c: any) => c.status === "Bakanlık Sürecinde");
+  const pendingEntryCandidates = candidates.filter((c: any) => {
+    if (c.status !== "Giriş Bekleniyor" && c.status !== "Giriş bekleniyor") return false;
+    // Eğer referans süresi dolmuşsa (Kaçan Refler'e düştüyse) bu listeden gizle
+    if (c.refExpiryDate && c.refExpiryDate < new Date().toISOString().split("T")[0] && (!c.appNumber || c.appNumber.trim() === "")) return false;
+    return true;
+  });
 
   const logAudit = async (action: string, details: string) =>{
     try {
@@ -768,6 +775,26 @@ export default function Dashboard() {
     }
   };
 
+  const handleDismissExpiredRef = async (c: any) =>{
+    setConfirmDialog({
+      isOpen: true,
+      title: "Referans Kaçtı Olarak İşaretle",
+      message: `"${c.firstName} ${c.lastName}" adlı personelin durumu "Referans Kaçtı" olarak güncellenecek. Kişi sistemden TAMAMEN SİLİNMEZ, sadece bu listeden kaldırılır ve ana personeller tablosunda "Referans Kaçtı" olarak görünür. Onaylıyor musunuz?`,
+      onConfirm: async () =>{
+        const res = await fetch(`/api/candidates/${c.id}`, { 
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ...c, status: "Referans Kaçtı" })
+        });
+        if (res.ok) {
+          logAudit("REFERANS_KACTI", `${c.firstName} ${c.lastName} (Pasaport: ${c.passportNo}) durumu Referans Kaçtı yapıldı.`);
+          fetchData();
+        }
+        setConfirmDialog((prev) =>({ ...prev, isOpen: false }));
+      }
+    });
+  };
+
   const handleDeleteCandidate = async (c: any) =>{
     setConfirmDialog({
       isOpen: true,
@@ -895,6 +922,13 @@ export default function Dashboard() {
             Şirkette Çalışıyor
           </span>
         );
+      case "Referans Kaçtı":
+        return (
+          <span className="text-xs px-2.5 py-1 rounded-lg bg-red-500/15 border border-red-500/30 text-red-400 font-bold flex items-center gap-1.5 whitespace-nowrap shadow-[0_0_10px_rgba(239,68,68,0.2)]">
+            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+            Referans Kaçtı
+          </span>
+        );
       case "Bakanlık Tarafından Reddedildi":
       case "Reddedildi":
         return (
@@ -923,6 +957,181 @@ export default function Dashboard() {
     }
   };
 
+  
+  // --- EXCEL DIŞA AKTARIM FONKSİYONLARI ---
+  const exportToExcel = (data: any[], filenamePrefix: string) => {
+    if (!data || data.length === 0) {
+      alert("Dışa aktarılacak veri bulunamadı.");
+      return;
+    }
+    const d = new Date();
+    const timestamp = d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,'0') + "-" + String(d.getDate()).padStart(2,'0') + "_" + String(d.getHours()).padStart(2,'0') + "-" + String(d.getMinutes()).padStart(2,'0');
+    
+    const ws = XLSX.utils.json_to_sheet(data);
+
+    // Sütun genişliklerini içerik ve başlık boyutuna göre dinamik olarak hesapla
+    const keys = Object.keys(data[0]);
+    const wscols = keys.map(key => {
+      const maxContentLength = Math.max(
+        key.length, // Başlığın kendi uzunluğu
+        ...data.map(row => {
+          const val = row[key];
+          return val !== null && val !== undefined ? String(val).length : 0;
+        })
+      );
+      return { wch: maxContentLength + 2 }; // Kenarlara 2 karakterlik ferahlık (padding) ekle
+    });
+    ws['!cols'] = wscols;
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Veriler");
+    XLSX.writeFile(wb, filenamePrefix + "_" + timestamp + ".xlsx");
+  };
+
+  const handleExportCandidates = () => {
+    const data = candidates.map((c, i) => ({
+      "No": i + 1,
+      "Sıra No": c.registrationNo ? "#prs" + c.registrationNo : "-",
+      "Ad Soyad": (c.firstName || "") + " " + (c.lastName || "").trim(),
+      "Pasaport No": c.passportNo || "-",
+      "Uyruk": c.nationality || "-",
+      "Cinsiyet": c.gender || "-",
+      "Meslek": c.profession || "-",
+      "Atanan Şirket": c.company?.name || "Şirketsiz",
+      "Maaş": c.salary || "-",
+      "Süreç Durumu": c.status || "-",
+      "Bakanlık Durumu": c.appStatus || "-",
+      "Referans No": c.refNumber || "-",
+      "Başvuru No": c.appNumber || "-",
+      "Yabancı Kimlik No": c.foreignIdNo || "-",
+      "Kayıt Tarihi": c.createdAt ? new Date(c.createdAt).toLocaleDateString("tr-TR") : "-"
+    }));
+    exportToExcel(data, "Tum_Personeller");
+  };
+
+  const handleExportCompanies = () => {
+    const data = companies.map((c, i) => ({
+      "No": i + 1,
+      "Şirket Adı": c.name || "-",
+      "Resmi Ünvan": c.officialName || "-",
+      "Vergi No": c.taxNumber || "-",
+      "Vergi Dairesi": c.taxOffice || "-",
+      "Yetkili Kişi": c.contactName || "-",
+      "Yetkili Ünvan": c.contactTitle || "-",
+      "Telefon": c.phone || "-",
+      "E-Posta": c.email || "-",
+      "Merkez Adresi": c.companyAddress || "-",
+      "Yabancı Çalışma Adresi": c.workAddress || "-",
+      "Kayıtlı Personel Sayısı": c.candidates?.length || 0,
+      "Yönlendiren/Referans": c.referralPerson || "-",
+      "Ekleyen Yetkili": c.createdByName || "-"
+    }));
+    exportToExcel(data, "Sirketler");
+  };
+
+  const handleExportDemands = () => {
+    const data = demandsList.map((d, i) => ({
+      "No": i + 1,
+      "Talep No": d.id ? "#" + d.id.substring(0,6) : "-",
+      "Şirket Adı": d.companyName || "-",
+      "Meslekler ve Sayılar": d.professions || "-",
+      "Toplam Kişi": d.headCount || "-",
+      "Talep Eden Kişi": d.requesterName || "-",
+      "Telefon Numarası": d.requesterPhone || "-",
+      "Şehir": d.cityName || "-",
+      "Talep Tarihi": d.createdAt ? new Date(d.createdAt).toLocaleDateString("tr-TR") : "-"
+    }));
+    exportToExcel(data, "Isci_Talepleri");
+  };
+
+  const handleExportPending = () => {
+    const data = pendingEntryCandidates.map((c, i) => ({
+      "No": i + 1,
+      "Sıra No": c.registrationNo ? "#prs" + c.registrationNo : "-",
+      "Ad Soyad": (c.firstName || "") + " " + (c.lastName || "").trim(),
+      "Pasaport No": c.passportNo || "-",
+      "Şirket": c.company?.name || "Şirketsiz",
+      "Referans No": c.refNumber || "-",
+      "Ref Son Günü": c.refExpiryDate ? new Date(c.refExpiryDate).toLocaleDateString("tr-TR") : "-",
+      "Süreç Durumu": c.status || "-"
+    }));
+    exportToExcel(data, "Giris_Bekleyenler");
+  };
+
+  const handleExportFees = () => {
+    const data = feePaymentCandidates.map((c, i) => ({
+      "No": i + 1,
+      "Sıra No": c.registrationNo ? "#prs" + c.registrationNo : "-",
+      "Ad Soyad": (c.firstName || "") + " " + (c.lastName || "").trim(),
+      "Pasaport No": c.passportNo || "-",
+      "Şirket": c.company?.name || "Şirketsiz",
+      "Başvuru No": c.appNumber || "-",
+      "Yabancı Kimlik No": c.foreignIdNo || "-",
+      "Harç Geldiği Gün": c.feeDate ? new Date(c.feeDate).toLocaleDateString("tr-TR") : "-",
+      "Harç Biteceği Gün": c.feeExpiryDate ? new Date(c.feeExpiryDate).toLocaleDateString("tr-TR") : "-"
+    }));
+    exportToExcel(data, "Harc_Odemeleri");
+  };
+
+  const handleExportTickets = () => {
+    const validStatuses = ["Bilet Bekliyor", "Bilet Alındı", "Bilet Zamanı Geldi (Durum Bilinmiyor)"];
+    const data = candidates.filter(c => validStatuses.includes(c.status)).map((c, i) => {
+      let fDate = "-", fNo = "-", fDep = "-", fArr = "-";
+      if (c.notes && c.notes.includes('_###FLIGHT_DATA###_')) {
+        try {
+          const fd = JSON.parse(c.notes.split('_###FLIGHT_DATA###_')[1].trim());
+          fNo = fd.flightNo || "-";
+          fDep = fd.depLocation ? fd.depLocation + " (" + fd.depDate + ")" : "-";
+          fArr = fd.arrLocation ? fd.arrLocation + " (" + fd.arrDate + ")" : "-";
+          fDate = fd.arrDate ? fd.arrDate.split("-").reverse().join(".") : "-";
+        } catch(e) {}
+      }
+      return {
+        "No": i + 1,
+        "Sıra No": c.registrationNo ? "#prs" + c.registrationNo : "-",
+        "Ad Soyad": (c.firstName || "") + " " + (c.lastName || "").trim(),
+        "Şirket": c.company?.name || "Şirketsiz",
+        "Süreç Durumu": c.status || "-",
+        "İniş Tarihi": fDate,
+        "Uçuş No": fNo,
+        "Kalkış Bilgisi": fDep,
+        "İniş Bilgisi": fArr
+      };
+    });
+    exportToExcel(data, "Bilet_Islemleri");
+  };
+
+  const handleExportExpiring = () => {
+    const data = expiringCandidates.map((c, i) => {
+      const days = getRemainingDays(c.refExpiryDate);
+      return {
+        "No": i + 1,
+        "Sıra No": c.registrationNo ? "#prs" + c.registrationNo : "-",
+        "Ad Soyad": (c.firstName || "") + " " + (c.lastName || "").trim(),
+        "Şirket": c.company?.name || "Şirketsiz",
+        "Referans No": c.refNumber || "-",
+        "Son Geçerlilik Tarihi": c.refExpiryDate ? new Date(c.refExpiryDate).toLocaleDateString("tr-TR") : "-",
+        "Kalan Gün": days !== null ? days : "-"
+      };
+    });
+    exportToExcel(data, "Suresi_Yaklasanlar");
+  };
+
+  const handleExportExpired = () => {
+    const expiredCands = candidates.filter(c => c.refExpiryDate && c.refExpiryDate < new Date().toISOString().split("T")[0] && (!c.appNumber || c.appNumber.trim() === "") && c.status !== "Bakanlık Tarafından Reddedildi" && c.status !== "Reddedildi" && c.status !== "Referans Kaçtı");
+    const data = expiredCands.map((c, i) => ({
+        "No": i + 1,
+        "Sıra No": c.registrationNo ? "#prs" + c.registrationNo : "-",
+        "Ad Soyad": (c.firstName || "") + " " + (c.lastName || "").trim(),
+        "Şirket": c.company?.name || "Şirketsiz",
+        "Referans No": c.refNumber || "-",
+        "Son Geçerlilik Tarihi": c.refExpiryDate ? new Date(c.refExpiryDate).toLocaleDateString("tr-TR") : "-",
+        "Ekleyen Yetkili": c.createdByName || "Sistem"
+    }));
+    exportToExcel(data, "Kacan_Refler");
+  };
+  // ------------------------------------------
+
   if (status === "loading") {
     return <div className="min-h-screen bg-slate-950 flex items-center justify-center text-white font-medium">Yükleniyor...</div>;
   }
@@ -931,8 +1140,8 @@ export default function Dashboard() {
     <div className="min-h-screen bg-slate-950 text-slate-100 flex">
       {/* SOL SIDEBAR */}
       <aside className="w-64 bg-slate-900 border-r border-slate-800 flex flex-col justify-between shrink-0 min-h-screen sticky top-0 h-screen">
-        <div>
-          <div className="p-5 border-b border-slate-800 flex items-center gap-3">
+        <div className="flex flex-col flex-1 overflow-hidden">
+          <div className="p-5 border-b border-slate-800 flex items-center gap-3 shrink-0">
             <div className="p-2.5 bg-blue-600 rounded-xl text-white font-black tracking-wider text-sm shadow-lg shadow-blue-600/30">VP</div>
             <div>
               <h1 className="font-bold text-white leading-tight text-sm">Personel Portalı</h1>
@@ -940,37 +1149,50 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <nav className="p-4 space-y-1.5">
+          <nav className="p-4 space-y-1.5 flex-1 overflow-y-auto overflow-x-hidden [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:bg-slate-700/50 [&::-webkit-scrollbar-thumb]:rounded-full hover:[&::-webkit-scrollbar-thumb]:bg-slate-600/50">
             <div className="flex flex-col gap-1 p-1.5 rounded-2xl bg-slate-950/40 border border-slate-800/50">
               <button onClick={() => setActiveTab("candidates")} className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${activeTab === "candidates" ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
-                <div className="flex items-center gap-2.5"><Users className="w-4 h-4" /><span>Personeller</span></div>
+                <div className="flex items-center gap-2.5"><Users className="w-4 h-4 text-blue-400" /><span>Personeller</span></div>
                 <span className={`text-xs px-2 py-0.5 rounded-md ${activeTab === "candidates" ? "bg-blue-700 text-white" : "bg-slate-800 text-slate-400"}`}>{candidates.length}</span>
               </button>
 
-              <button onClick={() => setActiveTab("companies")} className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${activeTab === "companies" ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
-                <div className="flex items-center gap-2.5"><Building2 className="w-4 h-4" /><span>Şirketler</span></div>
-                <span className={`text-xs px-2 py-0.5 rounded-md ${activeTab === "companies" ? "bg-blue-700 text-white" : "bg-slate-800 text-slate-400"}`}>{companies.length}</span>
+              <button onClick={() => setActiveTab("companies")} className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${activeTab === "companies" ? "bg-indigo-600 text-white shadow-lg shadow-indigo-600/20" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
+                <div className="flex items-center gap-2.5"><Building2 className="w-4 h-4 text-indigo-400" /><span>Şirketler</span></div>
+                <span className={`text-xs px-2 py-0.5 rounded-md ${activeTab === "companies" ? "bg-indigo-700 text-white" : "bg-slate-800 text-slate-400"}`}>{companies.length}</span>
               </button>
 
-              <button onClick={() => setActiveTab("demands")} className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${activeTab === "demands" ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
+              <button onClick={() => setActiveTab("demands")} className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${activeTab === "demands" ? "bg-amber-600 text-white shadow-lg shadow-amber-600/20" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
                 <div className="flex items-center gap-2.5"><Briefcase className="w-4 h-4 text-amber-400" /><span>Talepler</span></div>
-                <span className={`text-xs px-2 py-0.5 rounded-md ${activeTab === "demands" ? "bg-blue-700 text-white" : "bg-slate-800 text-slate-400"}`}>{demandsList.length}</span>
+                <span className={`text-xs px-2 py-0.5 rounded-md ${activeTab === "demands" ? "bg-amber-700 text-white" : "bg-slate-800 text-slate-400"}`}>{demandsList.length}</span>
               </button>
 
-              <button onClick={() => setActiveTab("pendingEntry")} className={`w-full flex items-center justify-between px-4 py-3 rounded-2xl font-medium text-sm transition-all cursor-pointer ${activeTab === "pendingEntry" ? "bg-blue-600 text-white shadow-lg shadow-blue-600/30" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
+              <button onClick={() => setActiveTab("pendingEntry")} className={`w-full flex items-center justify-between px-4 py-3 rounded-2xl font-medium text-sm transition-all cursor-pointer ${activeTab === "pendingEntry" ? "bg-purple-600 text-white shadow-lg shadow-purple-600/20" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
                 <div className="flex items-center gap-2.5"><Clock className="w-4 h-4 text-purple-400" /><span>Giriş Bekleyenler</span></div>
-                <span className={`text-xs px-2 py-0.5 rounded-md ${activeTab === "pendingEntry" ? "bg-blue-700 text-white" : "bg-slate-800 text-slate-400"}`}>{pendingEntryCandidates.length}</span>
+                <span className={`text-xs px-2 py-0.5 rounded-md ${activeTab === "pendingEntry" ? "bg-purple-700 text-white" : "bg-slate-800 text-slate-400"}`}>{pendingEntryCandidates.length}</span>
               </button>
 
-              <button onClick={() => setActiveTab("fee_payments")} className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${activeTab === "fee_payments" ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
+              
+        {/* Değerlendirme Aşaması */}
+        <button onClick={() => setActiveTab("evaluation")} className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${activeTab === "evaluation" ? "bg-amber-600 text-white shadow-lg shadow-amber-600/20" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
+          <div className="flex items-center gap-2.5">
+            <FileSearch className={`w-4 h-4 ${activeTab === "evaluation" ? "text-white" : "text-amber-400"}`} />
+            <span>Değerlendirme</span>
+          </div>
+          {evaluationCandidates && evaluationCandidates.length > 0 && (
+            <span className={`px-2 py-0.5 rounded-md text-xs font-bold ${activeTab === "evaluation" ? "bg-amber-700 text-white" : "bg-slate-800 text-slate-400"}`}>
+              {evaluationCandidates.length}
+            </span>
+          )}
+        </button>
+<button onClick={() => setActiveTab("fee_payments")} className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${activeTab === "fee_payments" ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
                 <div className="flex items-center gap-2.5"><CreditCard className="w-4 h-4 text-emerald-400" /><span>Harç Ödemeleri</span></div>
                 <span className={`text-xs px-2 py-0.5 rounded-md ${activeTab === "fee_payments" ? "bg-emerald-700 text-white" : "bg-slate-800 text-slate-400"}`}>{feePaymentCandidates.length}</span>
               </button>
 
-              <button onClick={() => setActiveTab("ticketsWaiting")} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200 ${activeTab === "ticketsWaiting" ? "bg-sky-500 text-white shadow-sm" : "text-slate-400 hover:bg-slate-800/50 hover:text-slate-300"}`}>
-                <Ticket className="w-[18px] h-[18px] shrink-0" />
+              <button onClick={() => setActiveTab("ticketsWaiting")} className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl transition-all duration-200 ${activeTab === "ticketsWaiting" ? "bg-sky-600 text-white shadow-lg shadow-sky-600/20" : "text-slate-400 hover:bg-slate-800/50 hover:text-slate-300"}`}>
+                <Ticket className="w-[18px] h-[18px] shrink-0 text-sky-400" />
                 <span className="font-medium text-[15px] whitespace-nowrap flex-1 text-left">Bilet Bekleyenler</span>
-                <span className={`ml-auto py-0.5 px-2 rounded-lg text-xs font-medium ${activeTab === "ticketsWaiting" ? "bg-white/20 text-white" : "bg-slate-800 text-slate-400"}`}>{candidates.filter((c) => c.status === "Bilet Bekliyor" || c.status === "Bilet Alındı" || c.status === "Bilet Zamanı Geldi (Durum Bilinmiyor)").length}</span>
+                <span className={`ml-auto py-0.5 px-2 rounded-lg text-xs font-medium ${activeTab === "ticketsWaiting" ? "bg-sky-700 text-white" : "bg-slate-800 text-slate-400"}`}>{candidates.filter((c) => c.status === "Bilet Bekliyor" || c.status === "Bilet Alındı" || c.status === "Bilet Zamanı Geldi (Durum Bilinmiyor)").length}</span>
               </button>
 
               <button onClick={() => setActiveTab("expiring_refs")} className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${activeTab === "expiring_refs" ? "bg-amber-600 text-white shadow-lg shadow-amber-600/20" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
@@ -982,9 +1204,9 @@ export default function Dashboard() {
                 )}
               </button>
               
-              <button onClick={() => setActiveTab("expired")} className={`w-full flex items-center justify-between p-2 pl-4 rounded-xl transition-all font-medium ${activeTab === "expired" ? "bg-red-500/10 text-red-400 border border-red-500/20" : "text-slate-500 hover:bg-slate-900 hover:text-red-400 border border-transparent"}`}>
+              <button onClick={() => setActiveTab("expired")} className={`w-full flex items-center justify-between p-2 pl-4 rounded-xl transition-all font-medium ${activeTab === "expired" ? "bg-red-600 text-white shadow-lg shadow-red-600/20" : "text-slate-500 hover:bg-slate-900 hover:text-red-400 border border-transparent"}`}>
                 <div className="flex items-center gap-2"><div className="w-1.5 h-1.5 rounded-full bg-red-500/60"></div><span className="text-sm">Kaçan Refler</span></div>
-                <span className="px-2 py-0.5 rounded-md bg-red-500/20 text-red-400 text-xs font-bold">{candidates.filter(c => c.refExpiryDate && c.refExpiryDate < new Date().toISOString().split("T")[0] && (!c.appNumber || c.appNumber.trim() === "") && c.status !== "Bakanlık Tarafından Reddedildi" && c.status !== "Reddedildi").length}</span>
+                <span className={`px-2 py-0.5 rounded-md text-xs font-bold ${activeTab === "expired" ? "bg-red-700 text-white" : "bg-red-500/20 text-red-400"}`}>{candidates.filter(c => c.refExpiryDate && c.refExpiryDate < new Date().toISOString().split("T")[0] && (!c.appNumber || c.appNumber.trim() === "") && c.status !== "Bakanlık Tarafından Reddedildi" && c.status !== "Reddedildi" && c.status !== "Referans Kaçtı").length}</span>
               </button>
             </div>
 
@@ -999,16 +1221,19 @@ export default function Dashboard() {
                     <span className="text-xs px-2 py-0.5 rounded-md bg-slate-800 text-slate-400">0</span>
                   )}
                 </button>
-                <button onClick={() => setActiveTab("users")} className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${activeTab === "users" ? "bg-blue-600 text-white shadow-lg shadow-blue-600/20" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
-                  <div className="flex items-center gap-2.5"><UserCog className="w-4 h-4" /><span>Kullanıcılar</span></div>
-                  <span className={`text-xs px-2 py-0.5 rounded-md ${activeTab === "users" ? "bg-blue-700 text-white" : "bg-slate-800 text-slate-400"}`}>{usersList.length}</span>
+                <button onClick={() => setActiveTab("users")} className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${activeTab === "users" ? "bg-teal-600 text-white shadow-lg shadow-teal-600/20" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
+                  <div className="flex items-center gap-2.5"><UserCog className="w-4 h-4 text-teal-400" /><span>Kullanıcılar</span></div>
+                  <span className={`text-xs px-2 py-0.5 rounded-md ${activeTab === "users" ? "bg-teal-700 text-white" : "bg-slate-800 text-slate-400"}`}>{usersList.length}</span>
+                </button>
+                <button onClick={() => setActiveTab("exports")} className={`w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl text-sm font-medium transition-all ${activeTab === "exports" ? "bg-emerald-600 text-white shadow-lg shadow-emerald-600/20" : "text-slate-400 hover:text-white hover:bg-slate-800/60"}`}>
+                  <div className="flex items-center gap-2.5"><FileSpreadsheet className="w-4 h-4 text-emerald-400" /><span>Excel Dışa Aktarım</span></div>
                 </button>
               </div>
             )}
           </nav>
         </div>
 
-        <div className="p-4 border-t border-slate-800 bg-slate-900/40">
+        <div className="p-4 border-t border-slate-800 bg-slate-900/40 shrink-0">
           <div className="flex items-center justify-between">
             <div className="overflow-hidden">
               <div className="text-xs font-semibold text-white truncate flex items-center gap-1.5">
@@ -1319,12 +1544,13 @@ export default function Dashboard() {
                         <th className="px-6 py-4">Son Geçerlilik Tarihi</th>
                         <th className="px-6 py-4">Şirket</th>
                         <th className="px-6 py-4">Acente</th>
-                        <th className="px-6 py-4 text-right">Ref. Giren Yetkili</th>
+                        <th className="px-6 py-4">Ref. Giren Yetkili</th>
+                        <th className="px-6 py-4 text-right">İşlemler</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/60">
                       {(candidates || [])
-                        .filter(c =>c.refExpiryDate && c.refExpiryDate < new Date().toISOString().split("T")[0] && (!c.appNumber || c.appNumber.trim() === "") && c.status !== "Bakanlık Tarafından Reddedildi" && c.status !== "Reddedildi")
+                        .filter(c =>c.refExpiryDate && c.refExpiryDate < new Date().toISOString().split("T")[0] && (!c.appNumber || c.appNumber.trim() === "") && c.status !== "Bakanlık Tarafından Reddedildi" && c.status !== "Reddedildi" && c.status !== "Referans Kaçtı")
                         .map((c) =>(
                           <tr key={c.id} className="hover:bg-red-900/20 transition-colors">
                             <td className="px-5 py-4 font-mono text-slate-400">{c.registrationNo}</td>
@@ -1334,12 +1560,22 @@ export default function Dashboard() {
                             <td className="px-6 py-4 font-mono text-red-400 font-bold">{c.refExpiryDate ? new Date(c.refExpiryDate).toLocaleDateString("tr-TR") : "-"}</td>
                             <td className="px-6 py-4 text-slate-300 whitespace-nowrap inline-flex items-center">{c.company?.name || "-"}</td>
                             <td className="px-6 py-4 text-slate-300">{c.agency || c.acente || "-"}</td>
-                            <td className="px-6 py-4 text-right font-medium text-slate-200">{c.createdBy || c.user || c.author || "Sistem"}</td>
+                            <td className="px-6 py-4 font-medium text-slate-200">{c.createdBy || c.user || c.author || "Sistem"}</td>
+                            <td className="px-6 py-4 text-right">
+                              <div className="flex items-center justify-end gap-1.5">
+                                <button type="button" onClick={() =>openMinistryModal(c)} className="p-2 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 transition-colors cursor-pointer" title="Bakanlık Bilgilerini Düzenle">
+                                  <Landmark className="w-4 h-4" />
+                                </button>
+                                <button type="button" onClick={() =>handleDismissExpiredRef(c)} className="p-2 rounded-lg text-slate-400 hover:text-red-400 hover:bg-red-500/10 transition-colors cursor-pointer" title="Listeden Kaldır (Referans Kaçtı Olarak İşaretle)">
+                                  <RotateCcw className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </td>
                           </tr>
                       ))}
-                      {(candidates || []).filter(c => c.refExpiryDate && c.refExpiryDate < new Date().toISOString().split("T")[0] && (!c.appNumber || c.appNumber.trim() === "") && c.status !== "Bakanlık Tarafından Reddedildi" && c.status !== "Reddedildi").length === 0 && (
+                      {(candidates || []).filter(c => c.refExpiryDate && c.refExpiryDate < new Date().toISOString().split("T")[0] && (!c.appNumber || c.appNumber.trim() === "") && c.status !== "Bakanlık Tarafından Reddedildi" && c.status !== "Reddedildi" && c.status !== "Referans Kaçtı").length === 0 && (
                         <tr>
-                          <td colSpan={8} className="px-6 py-12 text-center text-slate-500">
+                          <td colSpan={9} className="px-6 py-12 text-center text-slate-500">
                             Süresi geçmiş (kaçan) referansa sahip personel bulunmuyor.
                           </td>
                         </tr>)}
@@ -1932,7 +2168,206 @@ export default function Dashboard() {
               </div>
             </div>
           )}
-        </main>
+        
+          {/* EXCEL DIŞA AKTARIM MODÜLÜ */}
+          {activeTab === "exports" && isSuperAdmin && (
+            <div className="space-y-6 max-w-7xl animate-in fade-in duration-300 pb-10">
+              <div className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl flex items-center justify-between">
+                <div>
+                  <h2 className="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
+                    <FileSpreadsheet className="w-6 h-6 text-emerald-400" />
+                    Excel Dışa Aktarım Merkezi
+                  </h2>
+                  <p className="text-slate-400 text-sm mt-1.5">Sistemdeki tüm kayıtları menü kategorilerine göre Excel (.xlsx) formatında indirebilirsiniz. Lütfen indirmek istediğiniz rapor türünü seçin.</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+                {/* Personeller */}
+                <div className="bg-slate-900/60 border border-slate-800 hover:border-emerald-500/40 rounded-2xl p-5 transition-all group flex flex-col">
+                  <div className="w-10 h-10 rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                    <Users className="w-5 h-5 text-blue-400" />
+                  </div>
+                  <h3 className="text-base font-bold text-white mb-1">Tüm Personeller</h3>
+                  <p className="text-[11px] text-slate-400 mb-4 leading-relaxed flex-1">Sistemde kayıtlı olan tüm personellerin genel tablosunu dışa aktarır.</p>
+                  <button type="button" onClick={handleExportCandidates} className="w-full py-2 bg-emerald-600/10 hover:bg-emerald-600/20 border border-emerald-500/30 text-emerald-400 rounded-xl text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 cursor-pointer">
+                    <Download className="w-3.5 h-3.5" /> İndir
+                  </button>
+                </div>
+
+                {/* Şirketler */}
+                <div className="bg-slate-900/60 border border-slate-800 hover:border-emerald-500/40 rounded-2xl p-5 transition-all group flex flex-col">
+                  <div className="w-10 h-10 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                    <Building2 className="w-5 h-5 text-purple-400" />
+                  </div>
+                  <h3 className="text-base font-bold text-white mb-1">Şirketler</h3>
+                  <p className="text-[11px] text-slate-400 mb-4 leading-relaxed flex-1">Kayıtlı şirketlerin vergi, adres ve yetkili kişi bilgilerini raporlar.</p>
+                  <button type="button" onClick={handleExportCompanies} className="w-full py-2 bg-emerald-600/10 hover:bg-emerald-600/20 border border-emerald-500/30 text-emerald-400 rounded-xl text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 cursor-pointer">
+                    <Download className="w-3.5 h-3.5" /> İndir
+                  </button>
+                </div>
+
+                {/* Talepler */}
+                <div className="bg-slate-900/60 border border-slate-800 hover:border-emerald-500/40 rounded-2xl p-5 transition-all group flex flex-col">
+                  <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                    <Briefcase className="w-5 h-5 text-amber-400" />
+                  </div>
+                  <h3 className="text-base font-bold text-white mb-1">İşçi Talepleri</h3>
+                  <p className="text-[11px] text-slate-400 mb-4 leading-relaxed flex-1">Firmalardan gelen işçi taleplerini (meslek ve sayı) listeler.</p>
+                  <button type="button" onClick={handleExportDemands} className="w-full py-2 bg-emerald-600/10 hover:bg-emerald-600/20 border border-emerald-500/30 text-emerald-400 rounded-xl text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 cursor-pointer">
+                    <Download className="w-3.5 h-3.5" /> İndir
+                  </button>
+                </div>
+
+                {/* Giriş Bekleyenler */}
+                <div className="bg-slate-900/60 border border-slate-800 hover:border-emerald-500/40 rounded-2xl p-5 transition-all group flex flex-col">
+                  <div className="w-10 h-10 rounded-xl bg-purple-500/10 border border-purple-500/20 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                    <Clock className="w-5 h-5 text-purple-400" />
+                  </div>
+                  <h3 className="text-base font-bold text-white mb-1">Giriş Bekleyenler</h3>
+                  <p className="text-[11px] text-slate-400 mb-4 leading-relaxed flex-1">Referans numarası alıp sisteme giriş bekleyenlerin tablosu.</p>
+                  <button type="button" onClick={handleExportPending} className="w-full py-2 bg-emerald-600/10 hover:bg-emerald-600/20 border border-emerald-500/30 text-emerald-400 rounded-xl text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 cursor-pointer">
+                    <Download className="w-3.5 h-3.5" /> İndir
+                  </button>
+                </div>
+
+                {/* Harç Ödemeleri */}
+                <div className="bg-slate-900/60 border border-slate-800 hover:border-emerald-500/40 rounded-2xl p-5 transition-all group flex flex-col">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                    <CreditCard className="w-5 h-5 text-emerald-400" />
+                  </div>
+                  <h3 className="text-base font-bold text-white mb-1">Harç Ödemeleri</h3>
+                  <p className="text-[11px] text-slate-400 mb-4 leading-relaxed flex-1">Bakanlık harç ödemesi aşamasında olan personelleri listeler.</p>
+                  <button type="button" onClick={handleExportFees} className="w-full py-2 bg-emerald-600/10 hover:bg-emerald-600/20 border border-emerald-500/30 text-emerald-400 rounded-xl text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 cursor-pointer">
+                    <Download className="w-3.5 h-3.5" /> İndir
+                  </button>
+                </div>
+
+                {/* Bilet Bekleyenler */}
+                <div className="bg-slate-900/60 border border-slate-800 hover:border-emerald-500/40 rounded-2xl p-5 transition-all group flex flex-col">
+                  <div className="w-10 h-10 rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                    <Ticket className="w-5 h-5 text-sky-400" />
+                  </div>
+                  <h3 className="text-base font-bold text-white mb-1">Bilet İşlemleri</h3>
+                  <p className="text-[11px] text-slate-400 mb-4 leading-relaxed flex-1">Bilet alınan, bilet bekleyen veya uçuşu gelmiş personeller.</p>
+                  <button type="button" onClick={handleExportTickets} className="w-full py-2 bg-emerald-600/10 hover:bg-emerald-600/20 border border-emerald-500/30 text-emerald-400 rounded-xl text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 cursor-pointer">
+                    <Download className="w-3.5 h-3.5" /> İndir
+                  </button>
+                </div>
+
+                {/* Süresi Yaklaşan Refler */}
+                <div className="bg-slate-900/60 border border-slate-800 hover:border-emerald-500/40 rounded-2xl p-5 transition-all group flex flex-col">
+                  <div className="w-10 h-10 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                    <Clock className="w-5 h-5 text-amber-400" />
+                  </div>
+                  <h3 className="text-base font-bold text-white mb-1">Süresi Yaklaşanlar</h3>
+                  <p className="text-[11px] text-slate-400 mb-4 leading-relaxed flex-1">Referans numarası 5 gün ve daha az kalan personeller.</p>
+                  <button type="button" onClick={handleExportExpiring} className="w-full py-2 bg-emerald-600/10 hover:bg-emerald-600/20 border border-emerald-500/30 text-emerald-400 rounded-xl text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 cursor-pointer">
+                    <Download className="w-3.5 h-3.5" /> İndir
+                  </button>
+                </div>
+
+                {/* Kaçan Refler */}
+                <div className="bg-slate-900/60 border border-slate-800 hover:border-emerald-500/40 rounded-2xl p-5 transition-all group flex flex-col">
+                  <div className="w-10 h-10 rounded-xl bg-red-500/10 border border-red-500/20 flex items-center justify-center mb-3 group-hover:scale-110 transition-transform">
+                    <AlertCircle className="w-5 h-5 text-red-400" />
+                  </div>
+                  <h3 className="text-base font-bold text-white mb-1">Kaçan Refler</h3>
+                  <p className="text-[11px] text-slate-400 mb-4 leading-relaxed flex-1">Süresi dolmuş referans numarasına sahip personellerin tablosu.</p>
+                  <button type="button" onClick={handleExportExpired} className="w-full py-2 bg-emerald-600/10 hover:bg-emerald-600/20 border border-emerald-500/30 text-emerald-400 rounded-xl text-xs font-semibold transition-colors flex items-center justify-center gap-1.5 cursor-pointer">
+                    <Download className="w-3.5 h-3.5" /> İndir
+                  </button>
+                </div>
+
+
+
+              </div>
+            </div>
+          )}
+          
+          
+        {/* DEĞERLENDİRME AŞAMASI SEKMESİ */}
+        {activeTab === "evaluation" && (
+          <div className="space-y-6 max-w-7xl animate-in fade-in duration-300 pb-10">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-slate-900 p-6 rounded-2xl border border-slate-800 shadow-xl">
+              <div>
+                <h2 className="text-2xl font-bold text-white tracking-tight flex items-center gap-2">
+                  <FileSearch className="w-6 h-6 text-amber-400" />
+                  Değerlendirme
+                </h2>
+                <p className="text-slate-400 text-sm mt-1.5">Durumu "Bakanlık Sürecinde" olarak işaretlenen personellerin güncel listesi ve resmi detayları.</p>
+              </div>
+              <div className="px-4 py-2 bg-amber-500/10 border border-amber-500/20 rounded-xl flex items-center gap-3">
+                <span className="relative flex h-3 w-3">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-3 w-3 bg-amber-500"></span>
+                </span>
+                <span className="text-amber-400 font-semibold text-sm">{evaluationCandidates.length} Personel İşlemde</span>
+              </div>
+            </div>
+
+            <div className="bg-slate-900 rounded-2xl border border-slate-800 shadow-xl overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm text-left">
+                  <thead className="text-xs text-slate-400 uppercase bg-slate-900/50 border-b border-slate-800">
+                    <tr>
+                      <th className="px-6 py-4 font-semibold">Sıra No</th>
+                      <th className="px-6 py-4 font-semibold">Personel Bilgisi</th>
+                      <th className="px-6 py-4 font-semibold">Atanan Şirket</th>
+                      <th className="px-6 py-4 font-semibold">Başvuru No</th>
+                      <th className="px-6 py-4 font-semibold">Yabancı Kimlik No</th>
+                      <th className="px-6 py-4 font-semibold">Güncel Durum</th>
+                      <th className="px-6 py-4 text-right font-semibold">İşlemler</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/50">
+                    {evaluationCandidates.length > 0 ? evaluationCandidates.map((c: any, idx: number) => (
+                      <tr key={c.id || idx} className="hover:bg-slate-800/20 transition-colors group">
+                        <td className="px-6 py-4 font-medium text-slate-300">
+                          {c.registrationNo ? "#prs" + c.registrationNo : "-"}
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="font-medium text-white">{c.firstName} {c.lastName}</div>
+                          <div className="text-xs text-slate-500 mt-0.5">Pasaport: {c.passportNo || "-"}</div>
+                        </td>
+                        <td className="px-6 py-4 text-slate-300">{c.company?.name || "Şirketsiz"}</td>
+                        <td className="px-6 py-4 font-mono text-amber-400">{c.appNumber || "Girilecek"}</td>
+                        <td className="px-6 py-4 font-mono text-slate-300">{c.foreignIdNo || "-"}</td>
+                        <td className="px-6 py-4">
+                           <span className="text-xs px-2.5 py-1 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-400 font-bold flex items-center gap-1.5 w-max">
+                             <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
+                             Bakanlık Sürecinde
+                           </span>
+                        </td>
+                        <td className="px-6 py-4 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button type="button" onClick={() => { if(typeof openMinistryModal === 'function') openMinistryModal(c); }} className="p-2 rounded-lg text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 transition-colors cursor-pointer" title="Bakanlık Bilgilerini Düzenle">
+                              <Landmark className="w-4 h-4" />
+                            </button>
+                            <button type="button" onClick={() => setViewCandidate(c)} className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors cursor-pointer" title="Personel Detayı">
+                              <Eye className="w-4 h-4" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )) : (
+                      <tr>
+                        <td colSpan={7} className="px-6 py-12 text-center text-slate-500">
+                          <div className="flex flex-col items-center justify-center gap-3">
+                            <FileSearch className="w-10 h-10 text-slate-600/50" />
+                            <p>Bakanlık değerlendirmesinde olan güncel personel bulunmuyor.</p>
+                          </div>
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+
+</main>
       </div>
 
       {/* PERSONEL DETAY PENCERESİ */}
@@ -2269,6 +2704,7 @@ export default function Dashboard() {
                     <option value="Bilet Bekliyor">Bilet Bekliyor (Onaylandı)</option>
                     <option value="Şirkette Çalışıyor">Şirkette Çalışıyor</option>
                     <option value="Bakanlık Tarafından Reddedildi">Bakanlık Tarafından Reddedildi</option>
+                    <option value="Referans Kaçtı">Referans Kaçtı</option>
                   </select>
                 </div>
               </div>
@@ -2707,7 +3143,9 @@ export default function Dashboard() {
                 <div className="space-y-1.5">
                   {(selectedDemandDetail.professions || "").split(' | ').map((item: string, idx: number) =>{
                     const [pName, pCount] = item.split(':');
-                    return (
+                    
+  
+  return (
                       <div key={idx} className="flex justify-between items-center text-xs bg-slate-900/80 px-3 py-2 rounded-xl border border-slate-800">
                         <span className="text-slate-200 font-medium">{pName || "-"}</span>
                         <span className="text-blue-400 font-mono font-bold">{pCount || "0"} Kişi</span>
@@ -2991,6 +3429,7 @@ export default function Dashboard() {
                       Yabancı Kimlik Numarası (YKN - 11 Hane)
                     </label>
                     <input 
+                      required
                       maxLength={11}
                       placeholder="Örn: 99123456789" 
                       value={ministryForm.foreignIdNo || ""} 
